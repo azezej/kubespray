@@ -1,0 +1,75 @@
+---
+- name: Install nerdctl on all nodes
+  hosts: kube_control_plane:kube_node:calico_rr
+  gather_facts: false
+  any_errors_fatal: "{{ any_errors_fatal | default(true) }}"
+  vars:
+    nerdctl_version: "2.1.3"
+    nerdctl_arch: "amd64"
+    lingering_user: "kube"
+    nerdctl_download_url: "https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/nerdctl-full-{{ nerdctl_version }}-linux-amd64.tar.gz"
+    nerdctl_tarball_path: "/tmp/nerdctl-{{ nerdctl_version }}-linux-{{ nerdctl_arch }}.tar.gz"
+    ubuntu_packages:
+      - dbus-user-session
+      - uidmap
+      - systemd-container
+    sysctl_d_config: "/etc/sysctl.d/99-rootless.conf"
+
+  tasks:
+    - name: Download nerdctl
+      ansible.builtin.get_url:
+        checksum: sha256:https://github.com/containerd/nerdctl/releases/download/v{{ nerdctl_version }}/SHA256SUMS
+        url: "{{ nerdctl_download_url }}"
+        dest: "{{ nerdctl_tarball_path }}"
+        mode: '0644'
+
+    - name: Install nerdctl FULL to /usr/local/
+      ansible.builtin.unarchive:
+        remote_src: true
+        src: "{{ nerdctl_tarball_path }}"
+        dest: /usr/local/
+        creates: /usr/local/bin/nerdctl
+
+    - name: Install sysctls for rootless
+      ansible.builtin.copy:
+        src: 99-rootless.conf.j2
+        dest: /etc/sysctl.d/99-rootless.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install system packages
+      ansible.builtin.apt:
+        name: "{{ ubuntu_packages }}"
+
+    - name: Generate /etc/subuid
+      ansible.builtin.command:
+        cmd: |
+          for uid in {1000..65536}; do
+            uidx=$[ $uid * 65536 ]
+            echo "${uid}:${uidx}:65536" >> /etc/subuid
+          done
+        creates: /etc/subuid
+
+    - name: Generate /etc/subgid
+      ansible.builtin.command:
+        cmd: |
+          for gid in {1000..65536}; do
+            gidx=$[ $gid * 65536 ]
+            echo "${gid}:${gidx}:65536" >> /etc/subgid
+          done
+        creates: /etc/subgid
+
+    - name: Run systemd's loginctl to enable lingering services for user
+      ansible.builtin.command:
+        cmd: "loginctl enable-linger {{ lingering_user }}"
+
+    - name: Ensure nerdctl is installed
+      ansible.builtin.command:
+        cmd: "nerdctl --version"
+      register: nerdctl_version
+      changed_when: false
+
+    - name: Display nerdctl version
+      ansible.builtin.debug:
+        msg: "Nerdctl version installed: {{ nerdctl_version.stdout }}"
